@@ -8,35 +8,39 @@
 # here from:
 #     https://drive.google.com/drive/folders/1zUUMdNquQDe2gFwHZTMbG1DjhoXnX-bQ
 #
-# What this does:
-#   1. Enumerates the whole Drive tree (799 files) with `gdown --json`
-#      (no download, no auth) into .gdrive-manifest.json.
-#   2. Downloads every remote file into `sync/` with `gdown --folder --continue`
-#      (skips files already fully downloaded).
-#   3. rsync copies `sync/` files over the working tree (new + changed only).
-#   4. Reports new/changed/deleted files against git and, with --commit,
-#      commits only the tracked, non-ignored changes (zips/WAVs stay out).
+# Modes:
+#   --check    list the Drive tree and compare it to the working tree by path.
+#              Downloads nothing. Exits 0 always; reports drift for humans/CI.
+#   (default)  download changed files, copy them over the tree, report the diff.
+#   --commit   additionally commit the tracked, non-ignored changes.
+#   --full     ignore the size-updated date shortcut and re-fetch everything
+#              gdown would otherwise skip (slow; rarely needed).
 #
-# Usage:
-#   ./scripts/sync-from-drive.sh            dry-run: sync files, report diff, no commit
-#   ./scripts/sync-from-drive.sh --commit   sync + commit tracked changes
+# Requirements: python3, rsync, curl-less; gdown is installed into a venv at
+# .venv-drive/ on first run (or use a pre-existing one via GDOWN=/path/to/gdown).
 #
-# Requirements: python3, rsync, and gdown in a venv at .venv-drive (created on
-# first run). Remote-only renames move files locally but are not "deleted" from
-# the working tree unless you pass --prune.
+# Design notes:
+#   * Never deletes anything from the working tree. Files that exist locally
+#     but not on Drive (README.md, LICENSE.md, scripts/, docs/) are the fork's
+#     own additions and must survive. Remote-only additions are copied in and
+#     removals are *reported*, not applied.
+#   * .gitignore still excludes source zips, WAV banks and SD-card runtime
+#     data, so those refresh on disk but are never committed.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRIVE_URL="https://drive.google.com/drive/folders/1zUUMdNquQDe2gFwHZTMbG1DjhoXnX-bQ"
-VENV="$ROOT/.venv-drive"
-SYNC_DIR="$ROOT/.gdrive-cache"
+VENV="${VENV:-$ROOT/.venv-drive}"
+SYNC_DIR="${SYNC_DIR:-$ROOT/.gdrive-cache}"
 MANIFEST="$SYNC_DIR/.gdrive-manifest.json"
 COMMIT=0
-PRUNE=0
+CHECK=0
+FULL=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --commit) COMMIT=1 ;;
-    --prune)  PRUNE=1 ;;
+    --check)  CHECK=1 ;;
+    --full)   FULL=1 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
   shift
@@ -44,39 +48,84 @@ done
 
 mkdir -p "$SYNC_DIR"
 
-# --- gdown in an isolated venv so we don't touch the system python ----
-if [[ ! -x "$VENV/bin/gdown" ]]; then
+# --- gdown: honour an explicit GDOWN=..., else use/create the venv ----
+if [[ -n "${GDOWN:-}" ]]; then
+  :
+elif [[ -x "$VENV/bin/gdown" ]]; then
+  GDOWN="$VENV/bin/gdown"
+else
   echo ">> creating gdown venv at $VENV"
   python3 -m venv "$VENV"
-  "$VENV/bin/pip" install -q gdown
+  "$VENV/bin/pip" install -q --disable-pip-version-check gdown
+  GDOWN="$VENV/bin/gdown"
 fi
-GDOWN="$VENV/bin/gdown"
 
 echo ">> enumerating Drive folder (no auth)"
 "$GDOWN" --folder --json --no-cookies "$DRIVE_URL" 2>/dev/null > "$MANIFEST"
 TOTAL="$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))))' "$MANIFEST")"
 echo ">> remote manifest: $TOTAL files"
 
+report_tree_diff() {
+  python3 - "$MANIFEST" "$ROOT" <<'PY' || true
+import json, pathlib, sys
+manifest, root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+entries = json.loads(manifest.read_text())
+remote = {e["path"] for e in entries}
+# The fork's own files/dirs; Drive doesn't have these and they must not
+# count as drift.
+skip_prefix = (".git/", ".venv-drive/", ".gdrive-cache/", "docs/", "scripts/")
+skip_root = {"README.md", "LICENSE.md", ".gitignore"}
+# Files we intentionally relocated or replaced; they live in this tree under a
+# different name, so their absence by original path is not drift.
+relocated = {"README.txt": "docs/ORIGINAL-README.txt"}
+local = set()
+for p in root.rglob("*"):
+    if not p.is_file():
+        continue
+    rel = p.relative_to(root).as_posix()
+    if rel in skip_root or rel.startswith(skip_prefix):
+        continue
+    local.add(rel)
+missing = sorted(remote - local - relocated.keys())
+extra = sorted(local - remote - set(relocated.values()))
+for p in missing:
+    print(f"  MISSING LOCAL (on Drive): {p}")
+for p in extra:
+    print(f"  EXTRA LOCAL (not on Drive): {p}")
+print(f"  {len(remote)} remote / {len(local)} local files"
+      + ("" if missing or extra else " — tree matches Drive"))
+PY
+}
+
+if [[ "$CHECK" == 1 ]]; then
+  echo ">> checking tree against Drive (no downloads)"
+  report_tree_diff
+  echo ">> done (check mode)"
+  exit 0
+fi
+
 echo ">> downloading into $SYNC_DIR (resume/skip via --continue) …"
-"$GDOWN" --folder --no-cookies --continue -O "$SYNC_DIR" "$DRIVE_URL" 2>&1 | \
+DL_ARGS=( --folder --no-cookies --continue -O "$SYNC_DIR" )
+[[ "$FULL" == 1 ]] || DL_ARGS+=( --continue )
+"$GDOWN" "${DL_ARGS[@]}" "$DRIVE_URL" 2>&1 | \
   grep -viE '^\s*(Retrieving|To: |https://drive.google.com)' | tail -20 || true
 
 echo ">> copying into working tree"
-RSYNC_ARGS=( -a --checksum --exclude=.git --exclude=.gdrive-manifest.json
-             --exclude=.DS_Store )
-if [[ "$PRUNE" == 0 ]]; then
-  RSYNC_ARGS+=( --delete-excluded )
-else
-  RSYNC_ARGS+=( --delete )
-fi
-rsync "${RSYNC_ARGS[@]}" "$SYNC_DIR/"/ "$ROOT"/
+# -a: preserve modes/times. --checksum: compare bytes so unchanged files keep
+# their mtime and git records no diff. NO --delete: see design notes above.
+rsync -a --checksum --itemize-changes \
+  --exclude=.git --exclude=.gdrive-manifest.json --exclude=.DS_Store \
+  "$SYNC_DIR/"/ "$ROOT"/ | sed 's/^/  rsync /' || true
 
-echo ">> git status (tracked + untracked)"
+echo ">> tree vs Drive"
+report_tree_diff
+
+echo ">> git status"
 git -C "$ROOT" add -A
 git -C "$ROOT" status --short | head -100
 
 if [[ "$COMMIT" == 1 ]]; then
-  CHANGED="$(git -C "$ROOT" status --short | grep -vc '^$' || true)"
+  CHANGED="$(git -C "$ROOT" status --porcelain | grep -c . || true)"
   if [[ "${CHANGED:-0}" -gt 0 ]]; then
     echo ">> committing $CHANGED changed path(s)"
     git -C "$ROOT" commit -q -m "Sync: update distribution from Public Folders Drive

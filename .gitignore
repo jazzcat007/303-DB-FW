@@ -32,7 +32,6 @@ Launch Boy With All Apps/System/
 # Sync tooling state
 .venv-drive/
 .gdrive-cache/
-
 # ---------------------------------------------------------------------------
 # Local / OS noise
 .DS_Store

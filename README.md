@@ -67,27 +67,53 @@ unzip "<App> <ver>/Source Code/<Archive>.zip" -d vendor/<app>
 
 This repo mirrors 303 Resistance's public Drive folder
 ([`Public Folders`](https://drive.google.com/drive/folders/1zUUMdNquQDe2gFwHZTMbG1DjhoXnX-bQ)),
-which is the upstream distribution point for these apps. To pull the latest files into the
-tree, diff them against `main`, and optionally commit:
+which is the upstream distribution point for these apps. It updates two ways.
+
+### Automatically, on GitHub
+
+[`.github/workflows/sync-drive.yml`](.github/workflows/sync-drive.yml) runs on GitHub Actions:
+
+| Trigger | Job | What happens |
+| --- | --- | --- |
+| Schedule — Mondays 06:17 UTC | `sync` | Downloads from Drive, rsyncs, commits, pushes |
+| Manual dispatch → `check` | `check` | Lists Drive and compares to the repo; downloads nothing |
+| Manual dispatch → `sync` | `sync` | Same as the scheduled run |
+
+`check` runs in well under a minute and tells you whether the Drive folder has drifted from
+the repo. `sync` is the slow one (a full pass is several hundred MB, since the source zips
+and WAV banks are re-verified even though they're never committed).
+
+**Setup:** Actions is enabled on the repo already, and public repos get free minutes, so the
+`check` job works with no configuration. The `sync` job needs to push a commit, and a commit
+made with the default `GITHUB_TOKEN` will not trigger other workflows. To get real pushes:
+
+1. Create a fine-grained PAT with **Contents: Read and write** on this repo.
+2. Add it as a repository secret named **`SYNC_TOKEN`** (Settings → Secrets and variables →
+   Actions).
+3. The workflow uses `secrets.SYNC_TOKEN` and falls back to `github.token` if unset.
+
+### Locally
 
 ```sh
-./scripts/sync-from-drive.sh            # sync files, show git diff, no commit
-./scripts/sync-from-drive.sh --commit   # sync + commit the tracked changes
+./scripts/sync-from-drive.sh --check       # compare tree to Drive, no downloads
+./scripts/sync-from-drive.sh               # download + copy, show git diff, no commit
+./scripts/sync-from-drive.sh --commit      # ...and commit the tracked changes
 ```
 
-What it does, step by step:
+The script:
 
 1. Enumerates the whole Drive tree (no credentials needed — it's public) with `gdown --json`.
-2. Downloads/resumes every file into `.gdrive-cache/`, skipping already-fetched files.
+2. Downloads/resumes files into `.gdrive-cache/`.
 3. Copies new/changed files over the working tree with `rsync --checksum`.
-4. Reports the git diff, and (with `--commit`) commits only the tracked, non-ignored changes.
+4. Reports drift both ways, then commits tracked, non-ignored changes with `--commit`.
 
-`.gitignore` still keeps the source zips, WAV sample banks and SD-card runtime data out of git;
-the sync refreshes them on disk but they are never pushed. `scripts/sync-from-drive.sh` creates
-its own `gdown` venv under `.venv-drive/` on first run.
+It **never deletes** from the working tree: `README.md`, `LICENSE.md`, `scripts/` and `docs/`
+have no Drive counterpart, so a mirror-delete would wipe them. Files removed upstream are
+reported, not removed — delete those by hand if you want them gone.
 
-The exact set of files is captured in the (git-ignored) `.gdrive-cache/.gdrive-manifest.json`
-if you want to diff the Drive folder against the tree without re-downloading.
+`.gitignore` keeps the source zips, WAV sample banks and SD-card runtime data out of git; the
+sync refreshes them on disk but they are never pushed. The script creates its own `gdown` venv
+under `.venv-drive/` on first run (override with `GDOWN=/path/to/gdown`).
 
 ## Licence
 

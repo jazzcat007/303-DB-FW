@@ -1,0 +1,91 @@
+name: Sync from Drive
+
+# Keeps this mirror current with 303 Resistance's public Google Drive
+# "Public Folders" (the upstream distribution point for these apps):
+#   https://drive.google.com/drive/folders/1zUUMdNquQDe2gFwHZTMbG1DjhoXnX-bQ
+#
+# Two jobs:
+#   check  — cheap, no downloads: lists the Drive tree and compares it to the
+#            repo by path. Runs on every trigger, fails loudly if something was
+#            added/removed upstream that we don't have.
+#   sync   — full download + rsync + commit. Runs weekly, or on manual dispatch.
+#
+# Only files tracked by git are committed; .gitignore keeps source zips, WAV
+# sample banks and SD-card runtime data out of the history.
+
+on:
+  schedule:
+    # Mondays 06:17 UTC (off the hour to avoid the cron stampede).
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'check only, or full sync'
+        required: true
+        default: check
+        type: choice
+        options: [check, sync]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: drive-sync
+  cancel-in-progress: false
+
+jobs:
+  check:
+    # NOTE: `inputs.*` is only defined for workflow_dispatch; on a schedule it
+    # is empty. Always guard on event_name first so the two jobs stay exclusive.
+    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'sync'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compare repo to Drive
+        run: |
+          python3 -m venv .venv-drive
+          .venv-drive/bin/pip install -q --disable-pip-version-check gdown
+          GDOWN="$PWD/.venv-drive/bin/gdown" ./scripts/sync-from-drive.sh --check
+
+  sync:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'sync')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A token that can push; see README "Keeping up to date".
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Sync from Drive and commit
+        env:
+          GIT_AUTHOR_NAME: drive-sync[bot]
+          GIT_AUTHOR_EMAIL: drive-sync@users.noreply.github.com
+          GIT_COMMITTER_NAME: drive-sync[bot]
+          GIT_COMMITTER_EMAIL: drive-sync@users.noreply.github.com
+        run: |
+          python3 -m venv .venv-drive
+          .venv-drive/bin/pip install -q --disable-pip-version-check gdown
+          GDOWN="$PWD/.venv-drive/bin/gdown" ./scripts/sync-from-drive.sh --commit
+
+      - name: Push if anything changed
+        run: |
+          # A scheduled run checks out the default branch detached, so compare
+          # against FETCH_HEAD-safe refs rather than assuming origin/<branch>.
+          BRANCH="$GITHUB_REF_NAME"
+          git fetch -q origin "$BRANCH"
+          if git diff --quiet FETCH_HEAD HEAD; then
+            echo "no new commits — nothing to push"
+          else
+            git push origin "HEAD:$BRANCH"
+          fi
