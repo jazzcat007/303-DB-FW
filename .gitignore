@@ -29,6 +29,11 @@ Launch Boy With All Apps/System/
 *.ins
 
 # ---------------------------------------------------------------------------
+# Sync tooling state
+.venv-drive/
+.gdrive-cache/
+
+# ---------------------------------------------------------------------------
 # Local / OS noise
 .DS_Store
 Thumbs.db

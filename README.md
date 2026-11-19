@@ -9,6 +9,10 @@
 > and documentation — alongside pinned references to the exact upstream commits each release
 > was built from. See [`docs/UPSTREAM.md`](docs/UPSTREAM.md).
 
+> **Canonical source** is 303 Resistance's public Google Drive folder:
+> <https://drive.google.com/drive/folders/1zUUMdNquQDe2gFwHZTMbG1DjhoXnX-bQ>.
+> This repo is kept in sync with it — see [Keeping up to date](#keeping-up-to-date).
+
 ## Contents
 
 | App | Version | Firmware | Source |
@@ -58,6 +62,32 @@ with upstream:
 ```sh
 unzip "<App> <ver>/Source Code/<Archive>.zip" -d vendor/<app>
 ```
+
+## Keeping up to date
+
+This repo mirrors 303 Resistance's public Drive folder
+([`Public Folders`](https://drive.google.com/drive/folders/1zUUMdNquQDe2gFwHZTMbG1DjhoXnX-bQ)),
+which is the upstream distribution point for these apps. To pull the latest files into the
+tree, diff them against `main`, and optionally commit:
+
+```sh
+./scripts/sync-from-drive.sh            # sync files, show git diff, no commit
+./scripts/sync-from-drive.sh --commit   # sync + commit the tracked changes
+```
+
+What it does, step by step:
+
+1. Enumerates the whole Drive tree (no credentials needed — it's public) with `gdown --json`.
+2. Downloads/resumes every file into `.gdrive-cache/`, skipping already-fetched files.
+3. Copies new/changed files over the working tree with `rsync --checksum`.
+4. Reports the git diff, and (with `--commit`) commits only the tracked, non-ignored changes.
+
+`.gitignore` still keeps the source zips, WAV sample banks and SD-card runtime data out of git;
+the sync refreshes them on disk but they are never pushed. `scripts/sync-from-drive.sh` creates
+its own `gdown` venv under `.venv-drive/` on first run.
+
+The exact set of files is captured in the (git-ignored) `.gdrive-cache/.gdrive-manifest.json`
+if you want to diff the Drive folder against the tree without re-downloading.
 
 ## Licence
 
