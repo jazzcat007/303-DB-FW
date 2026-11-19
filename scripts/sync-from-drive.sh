@@ -105,10 +105,12 @@ if [[ "$CHECK" == 1 ]]; then
 fi
 
 echo ">> downloading into $SYNC_DIR (resume/skip via --continue) …"
-DL_ARGS=( --folder --no-cookies --continue -O "$SYNC_DIR" )
+# --continue makes gdown skip files it believes are already complete and
+# resume interrupted ones. --full drops it so everything is re-fetched.
+DL_ARGS=( --folder --no-cookies --retries 3 -O "$SYNC_DIR" )
 [[ "$FULL" == 1 ]] || DL_ARGS+=( --continue )
 "$GDOWN" "${DL_ARGS[@]}" "$DRIVE_URL" 2>&1 | \
-  grep -viE '^\s*(Retrieving|To: |https://drive.google.com)' | tail -20 || true
+  grep -viE '^\s*(Retrieving|To: |https://drive.google.com)' | tail -30 || true
 
 echo ">> copying into working tree"
 # -a: preserve modes/times. --checksum: compare bytes so unchanged files keep
@@ -116,6 +118,25 @@ echo ">> copying into working tree"
 rsync -a --checksum --itemize-changes \
   --exclude=.git --exclude=.gdrive-manifest.json --exclude=.DS_Store \
   "$SYNC_DIR/"/ "$ROOT"/ | sed 's/^/  rsync /' || true
+
+# A failed download must not masquerade as "no changes". Every remote path must
+# exist in the cache before we trust the rsync result.
+echo ">> verifying download completeness"
+MISSING_DL="$(python3 - "$MANIFEST" "$SYNC_DIR" <<'PY'
+import json, pathlib, sys
+manifest, cache = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+missing = [e["path"] for e in json.loads(manifest.read_text())
+           if not (cache / e["path"]).is_file()]
+print("\n".join(missing))
+PY
+)"
+if [[ -n "$MISSING_DL" ]]; then
+  echo "!! download incomplete — these remote files are not in the cache:" >&2
+  printf '%s\n' "$MISSING_DL" | head -20 >&2
+  echo "!! not committing a partial sync (re-run to resume with --continue)" >&2
+  exit 1
+fi
+echo "   all remote files present in cache"
 
 echo ">> tree vs Drive"
 report_tree_diff
