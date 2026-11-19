@@ -1,0 +1,75 @@
+STUDIO BOY FREEWARE LICENCE
+
+Copyright (c) 2026 303 Resistance. All rights reserved.
+
+Studio Boy is free. You don't pay for it, and this licence says what you may do with it. 303 Resistance keeps
+ownership of the firmware, its code, its design and its name.
+
+"Studio Boy" means the Studio Boy firmware (the Drumboy_Pro_Fw_*.bin file), the pattern, settings and other files
+made for it on this SD card, and its documentation.
+
+
+1. WHAT YOU MAY DO
+
+   You may, free of charge:
+   a) download Studio Boy, install it on a Drumboy Pro and use it, for any music: at home, in the studio, live,
+      for fun or for money;
+   b) copy and give away Studio Boy, unmodified and complete with this licence and its notices, for free.
+
+   The music you make with Studio Boy is yours. This licence claims nothing in it.
+
+
+2. WHAT YOU MAY NOT DO
+
+   You may not:
+   a) sell, rent or lease Studio Boy, or charge for copying it or giving it away, on its own or bundled with
+      anything else, without written permission from 303 Resistance;
+   b) modify, adapt, translate, decompile, disassemble or reverse engineer the firmware, except where the law
+      allows it whatever a licence says;
+   c) give away a modified copy of any part of Studio Boy;
+   d) remove or change any copyright, licence or trademark notice, including the ones on the ABOUT screen.
+
+
+3. OWNERSHIP AND THE NAME
+
+   303 Resistance owns Studio Boy and all intellectual property in it. This licence gives you the rights in
+   section 1 and nothing else. All other rights are reserved.
+
+   Studio Boy(TM) is a trademark of 303 Resistance. Don't use the name, or a name like it, for another product, or
+   in a way that suggests 303 Resistance made or approved something it didn't.
+
+
+4. OTHER PEOPLE'S WORK
+
+   Studio Boy uses work by others. Each part stays under its own terms, which come first for that part:
+   - Drumboy Pro board code and fonts: Copyright (c) 2026 Randomwaves, MIT licence;
+   - FatFs: Copyright (C) ChaN, FatFs licence;
+   - minimp3: lieff, CC0;
+   - STM32H7 drivers: Copyright (c) STMicroelectronics, under ST's licence terms.
+
+   The audio samples on this card (the drum kits and the sample libraries) remain the property of their makers and
+   are covered by those makers' terms. This licence gives no rights in them beyond what those terms allow.
+
+   Studio Boy runs on the Drumboy Pro, open hardware by Randomwaves. Studio Boy is not produced or endorsed by
+   Randomwaves.
+
+
+5. NO WARRANTY
+
+   Studio Boy is given free and "as is", without warranty of any kind. Installing firmware carries risk. You
+   install and use Studio Boy at your own risk. As far as the law allows, 303 Resistance is not liable for any loss
+   or damage arising from its use, including lost work, lost data or damage to hardware. Nothing in this licence
+   limits liability that the law does not allow to be limited.
+
+
+6. ENDING
+
+   This licence ends automatically if you break it. When it ends you must stop using and sharing Studio Boy.
+
+
+7. LAW
+
+   This licence is governed by the law of England and Wales.
+
+
+For permission to do anything this licence doesn't allow, contact 303 Resistance (Instagram @303resistance).

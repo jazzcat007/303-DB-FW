@@ -1,0 +1,12 @@
+APHEX BOY 0.02 (17 Nov 2026)
+
+Aphex Boy is Techno Boy's APHEX on its own: a generative instrument after Aphex Twin that writes its own broken,
+shifting parts from a seed - eight polymeter tracks and two vocal chops, drills and ratchets down to 1/128, glitch and a
+grain cloud - and keeps rewriting them as it plays. At its defaults it plays exactly what Techno Boy's APHEX plays.
+Around it, Berlin Boy's tools: the MIXER (a strip per track, the mutes on keys 10-30), the drum kits (909, 808, 727, 606
+or your own folders: + / - on APHEX, ||| changes on the next bar) and 27 MIX-UP, pads 1-5 played by hand and 6-10
+played by APHEX and moved by PAN (hold a pad 2 s to load it), scenes, FILTER, ECHO, ten reverbs, RUMBLE, COMP and
+LIMITER, and the MIDI MAP with LEARN. Key 7 held is a BUILD, let go a DROP; 9 ECHO THROW; 25 REGENERATE; 26 HOLD.
+Key 31 (bottom left) steps through APHEX, MIXER, KIT, MIDI MAP; hold 42 (bottom right) for every page's second knobs.
+
+Not yet tried on the box. No User Guide yet: the key maps (Key maps\) show what every key and knob does on each page.

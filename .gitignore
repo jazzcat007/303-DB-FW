@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------------
+# Source archives
+# Each app's ProPublic source ships as a git-archive zip of an upstream repo
+# (notagroovebox/<app>) at a pinned commit. See docs/UPSTREAM.md for the
+# commit each one corresponds to. Add them locally from the distribution;
+# they are not stored in this repo (two exceed GitHub's 100 MB file limit).
+*.zip
+
+# ---------------------------------------------------------------------------
+# Audio assets
+# Drum kits, pad WAVs and sample banks are large binary content and are
+# excluded. The firmware, user guides and documentation live in the repo.
+*.wav
+*.WAV
+
+# ---------------------------------------------------------------------------
+# SD-card runtime data
+# Pattern banks, kit definitions and the virtual Drumboy Pro's filesystem,
+# written by the box as you play. In the Launch Boy image they live under
+# System/File and System/Drumkit; everything outside those trees (firmware,
+# samples, docs) is versioned normally.
+Launch Boy With All Apps/System/
+*.rwf
+*.rwd
+*.rwp
+*.rwi
+*.gbs
+*.gbp
+*.ins
+
+# ---------------------------------------------------------------------------
+# Local / OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+__MACOSX/
+*.swp
+*~
