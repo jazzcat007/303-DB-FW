@@ -9,15 +9,23 @@
 #     https://drive.google.com/drive/folders/1zUUMdNquQDe2gFwHZTMbG1DjhoXnX-bQ
 #
 # Modes:
-#   --check    list the Drive tree and compare it to the working tree by path.
-#              Downloads nothing. Exits 0 always; reports drift for humans/CI.
+#   --poll     LISTING ONLY. Fetch the Drive tree, print a fingerprint of it,
+#              and exit 0. Downloads nothing. This is what the scheduled poll
+#              job runs; it costs one folder listing (~2 s, no file bytes).
+#   --check    (alias: --poll) same listing, plus a comparison to this tree.
+#   --fingerprint FILE
+#              write/compare the listing fingerprint at FILE. With an existing
+#              FILE, prints "changed" / "unchanged" on the last line.
 #   (default)  download changed files, copy them over the tree, report the diff.
 #   --commit   additionally commit the tracked, non-ignored changes.
-#   --full     ignore the size-updated date shortcut and re-fetch everything
-#              gdown would otherwise skip (slow; rarely needed).
+#   --full     re-fetch everything (ignore gdown's resume/skip).
+#   --if-changed
+#              skip the download entirely when the listing fingerprint matches
+#              the one stored in .gdrive-cache/.fingerprint. Lets the scheduled
+#              job poll cheaply and only do real work when Drive actually moved.
 #
-# Requirements: python3, rsync, curl-less; gdown is installed into a venv at
-# .venv-drive/ on first run (or use a pre-existing one via GDOWN=/path/to/gdown).
+# Requirements: python3, rsync; gdown is installed into a venv at .venv-drive/
+# on first run (or point at an existing one with GDOWN=/path/to/gdown).
 #
 # Design notes:
 #   * Never deletes anything from the working tree. Files that exist locally
@@ -26,6 +34,10 @@
 #     removals are *reported*, not applied.
 #   * .gitignore still excludes source zips, WAV banks and SD-card runtime
 #     data, so those refresh on disk but are never committed.
+#   * Drive keeps a file's ID when its contents are replaced, so the listing
+#     fingerprint catches *structural* change (files added, removed, renamed)
+#     immediately. A same-ID content edit is caught on the next scheduled
+#     --full, or by a content hash check in the sync step.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -33,14 +45,19 @@ DRIVE_URL="https://drive.google.com/drive/folders/1zUUMdNquQDe2gFwHZTMbG1DjhoXnX
 VENV="${VENV:-$ROOT/.venv-drive}"
 SYNC_DIR="${SYNC_DIR:-$ROOT/.gdrive-cache}"
 MANIFEST="$SYNC_DIR/.gdrive-manifest.json"
+FP_FILE="$SYNC_DIR/.fingerprint"
 COMMIT=0
-CHECK=0
+MODE="sync"
 FULL=0
+IF_CHANGED=0
+FP_ARG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --commit) COMMIT=1 ;;
-    --check)  CHECK=1 ;;
-    --full)   FULL=1 ;;
+    --commit)      COMMIT=1 ;;
+    --poll|--check) MODE="poll" ;;
+    --full)        FULL=1 ;;
+    --if-changed)  IF_CHANGED=1 ;;
+    --fingerprint) FP_ARG="${2:-}"; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
   shift
@@ -60,10 +77,38 @@ else
   GDOWN="$VENV/bin/gdown"
 fi
 
-echo ">> enumerating Drive folder (no auth)"
-"$GDOWN" --folder --json --no-cookies "$DRIVE_URL" 2>/dev/null > "$MANIFEST"
+echo ">> enumerating Drive folder (listing only, no file bytes)"
+if ! "$GDOWN" --folder --json --no-cookies "$DRIVE_URL" 2>/dev/null > "$MANIFEST"; then
+  echo "!! Drive listing failed (network or Drive error)" >&2
+  exit 1
+fi
 TOTAL="$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))))' "$MANIFEST")"
 echo ">> remote manifest: $TOTAL files"
+
+# --- structural fingerprint: sorted "path<TAB>id" over the whole listing ---
+FINGERPRINT="$(python3 - "$MANIFEST" <<'PY'
+import hashlib, json, sys
+entries = json.loads(open(sys.argv[1]).read())
+items = sorted((e["path"], e["url"].rsplit("id=", 1)[-1]) for e in entries)
+blob = "\n".join(f"{p}\t{i}" for p, i in items)
+print(hashlib.sha256(blob.encode()).hexdigest())
+PY
+)"
+echo ">> fingerprint: $FINGERPRINT"
+
+if [[ -n "$FP_ARG" ]]; then
+  PREV=""
+  [[ -f "$FP_ARG" ]] && PREV="$(tr -d '\r\n' < "$FP_ARG")"
+  mkdir -p "$(dirname "$FP_ARG")"
+  printf '%s\n' "$FINGERPRINT" > "$FP_ARG"
+  if [[ -z "$PREV" ]]; then
+    echo "STATE new"
+  elif [[ "$PREV" == "$FINGERPRINT" ]]; then
+    echo "STATE unchanged"
+  else
+    echo "STATE changed"
+  fi
+fi
 
 report_tree_diff() {
   python3 - "$MANIFEST" "$ROOT" <<'PY' || true
@@ -73,10 +118,10 @@ entries = json.loads(manifest.read_text())
 remote = {e["path"] for e in entries}
 # The fork's own files/dirs; Drive doesn't have these and they must not
 # count as drift.
-skip_prefix = (".git/", ".venv-drive/", ".gdrive-cache/", "docs/", "scripts/")
+skip_prefix = (".git/", ".github/", ".venv-drive/", ".gdrive-cache/", "docs/", "scripts/")
 skip_root = {"README.md", "LICENSE.md", ".gitignore"}
-# Files we intentionally relocated or replaced; they live in this tree under a
-# different name, so their absence by original path is not drift.
+# Files we intentionally relocated; present under a different name, so their
+# absence by original path is not drift.
 relocated = {"README.txt": "docs/ORIGINAL-README.txt"}
 local = set()
 for p in root.rglob("*"):
@@ -92,17 +137,34 @@ for p in missing:
     print(f"  MISSING LOCAL (on Drive): {p}")
 for p in extra:
     print(f"  EXTRA LOCAL (not on Drive): {p}")
-print(f"  {len(remote)} remote / {len(local)} local files"
+relocated_note = (f" ({len(relocated)} relocated: "
+                  + ", ".join(f"{k}->{v}" for k, v in relocated.items()) + ")"
+                  if relocated else "")
+print(f"  {len(remote)} remote / {len(local)} local files{relocated_note}"
       + ("" if missing or extra else " — tree matches Drive"))
 PY
 }
 
-if [[ "$CHECK" == 1 ]]; then
+if [[ "$MODE" == "poll" ]]; then
   echo ">> checking tree against Drive (no downloads)"
   report_tree_diff
-  echo ">> done (check mode)"
+  echo ">> done (poll mode)"
   exit 0
 fi
+
+# --- change gate: skip the expensive download when nothing moved ---
+if [[ "$IF_CHANGED" == 1 && "$FULL" == 0 && -f "$FP_FILE" ]]; then
+  PREV="$(tr -d '\r\n' < "$FP_FILE")"
+  if [[ "$PREV" == "$FINGERPRINT" ]]; then
+    echo ">> listing unchanged since last sync — skipping download"
+    printf '%s\n' "$FINGERPRINT" > "$FP_FILE"
+    report_tree_diff
+    echo ">> done (no upstream change)"
+    exit 0
+  fi
+  echo ">> listing changed since last sync — downloading"
+fi
+printf '%s\n' "$FINGERPRINT" > "$FP_FILE"
 
 echo ">> downloading into $SYNC_DIR (resume/skip via --continue) …"
 # --continue makes gdown skip files it believes are already complete and

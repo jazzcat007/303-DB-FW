@@ -71,23 +71,39 @@ which is the upstream distribution point for these apps. It updates two ways.
 
 ### Automatically, on GitHub
 
-[`.github/workflows/sync-drive.yml`](.github/workflows/sync-drive.yml) runs on GitHub Actions:
+[`.github/workflows/sync-drive.yml`](.github/workflows/sync-drive.yml) **polls** 303 Resistance's
+Drive folder and updates this repo when it changes:
 
 | Trigger | Job | What happens |
 | --- | --- | --- |
-| Schedule — Mondays 06:17 UTC | `sync` | Downloads from Drive, rsyncs, commits, pushes |
-| Manual dispatch → `check` | `check` | Lists Drive and compares to the repo; downloads nothing |
-| Manual dispatch → `sync` | `sync` | Same as the scheduled run |
+| Every 6 h (`23 */6 * * *`) | `poll` | Lists Drive and fingerprints it. **No file downloads.** |
+| Same schedule, if the poll saw a change | `watch` | Downloads, rsyncs, commits, pushes, opens an issue |
+| Mondays 06:17 UTC | `sync` | Unconditional full sync, catching same-ID content edits |
+| Manual → `check` | `poll` | List + compare, download nothing |
+| Manual → `watch` | `watch` | Gate on its own fingerprint, sync only if changed |
+| Manual → `sync` | `sync` | Force a full sync |
 
-`check` runs in well under a minute and tells you whether the Drive folder has drifted from
-the repo. `sync` is the slow one (a full pass is several hundred MB, since the source zips
-and WAV banks are re-verified even though they're never committed).
+**How polling works.** Drive has no webhook for anonymous folders, so there's nothing to
+subscribe to — the workflow polls the *listing* instead of the files. Listing the tree is a
+single request that transfers no file bytes, which is cheap enough to run four times a day and
+stays well below Drive's anonymous-access throttling (that throttle is exactly why single-file
+downloads can intermittently fail with *"you may have had many accesses"*).
 
-**Setup:** Actions is enabled on the repo already, and public repos get free minutes, so the
-`check` job works with no configuration. The `sync` job needs to push a commit, and a commit
-made with the default `GITHUB_TOKEN` will not trigger other workflows. To get real pushes:
+The listing is reduced to a fingerprint — a SHA-256 over sorted `path`+`fileId` pairs — stored
+in `.gdrive-cache/.fingerprint` and carried between runs by the Actions cache. When the
+fingerprint matches, `watch` never downloads anything.
 
-1. Create a fine-grained PAT with **Contents: Read and write** on this repo.
+**What polling catches, and what it doesn't.** Drive mints a new `fileId` for a new file, so
+**files added, removed or renamed** are caught on the next 6-hourly poll. Replacing a file's
+*contents* while keeping its ID is **invisible** to the listing, so the weekly `sync` exists to
+catch that class of change. If you need content edits caught faster, lower the `sync` cron.
+
+**Setup:** Actions is enabled and public repos get free minutes, so `poll` needs no
+configuration. The jobs that push need a token, and a commit made with the default
+`GITHUB_TOKEN` will not trigger other workflows. To get real pushes:
+
+1. Create a fine-grained PAT with **Contents: Read and write** (and **Issues: Read and write**
+   for the change notifications) on this repo.
 2. Add it as a repository secret named **`SYNC_TOKEN`** (Settings → Secrets and variables →
    Actions).
 3. The workflow uses `secrets.SYNC_TOKEN` and falls back to `github.token` if unset.
@@ -95,21 +111,27 @@ made with the default `GITHUB_TOKEN` will not trigger other workflows. To get re
 ### Locally
 
 ```sh
-./scripts/sync-from-drive.sh --check       # compare tree to Drive, no downloads
+./scripts/sync-from-drive.sh --poll        # list + compare, no downloads
 ./scripts/sync-from-drive.sh               # download + copy, show git diff, no commit
 ./scripts/sync-from-drive.sh --commit      # ...and commit the tracked changes
+./scripts/sync-from-drive.sh --commit --if-changed   # only if the listing moved
+./scripts/sync-from-drive.sh --commit --full         # force re-fetch everything
 ```
 
 The script:
 
-1. Enumerates the whole Drive tree (no credentials needed — it's public) with `gdown --json`.
-2. Downloads/resumes files into `.gdrive-cache/`.
+1. Enumerates the whole Drive tree (no credentials needed — it's public) with `gdown --json`,
+   and prints a fingerprint of it.
+2. Downloads/resumes files into `.gdrive-cache/` (skipped entirely with `--if-changed` when the
+   fingerprint is unchanged).
 3. Copies new/changed files over the working tree with `rsync --checksum`.
-4. Reports drift both ways, then commits tracked, non-ignored changes with `--commit`.
+4. Verifies every remote path landed in the cache — an incomplete download **fails the run**
+   rather than silently reporting "no changes".
+5. Reports drift both ways, then commits tracked, non-ignored changes with `--commit`.
 
-It **never deletes** from the working tree: `README.md`, `LICENSE.md`, `scripts/` and `docs/`
-have no Drive counterpart, so a mirror-delete would wipe them. Files removed upstream are
-reported, not removed — delete those by hand if you want them gone.
+It **never deletes** from the working tree: `README.md`, `LICENSE.md`, `scripts/`, `docs/` and
+`.github/` have no Drive counterpart, so a mirror-delete would wipe them. Files removed
+upstream are reported, not removed — delete those by hand if you want them gone.
 
 `.gitignore` keeps the source zips, WAV sample banks and SD-card runtime data out of git; the
 sync refreshes them on disk but they are never pushed. The script creates its own `gdown` venv

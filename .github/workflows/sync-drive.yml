@@ -4,42 +4,68 @@ name: Sync from Drive
 # "Public Folders" (the upstream distribution point for these apps):
 #   https://drive.google.com/drive/folders/1zUUMdNquQDe2gFwHZTMbG1DjhoXnX-bQ
 #
-# Two jobs:
-#   check  — cheap, no downloads: lists the Drive tree and compares it to the
-#            repo by path. Runs on every trigger, fails loudly if something was
-#            added/removed upstream that we don't have.
-#   sync   — full download + rsync + commit. Runs weekly, or on manual dispatch.
+# How it polls
+# ------------
+# A cron job can't watch for Drive webhooks (Drive has no push for anonymous
+# folders), so we poll the *listing* instead of the files. Listing the tree
+# costs one request and zero file bytes, so it is safe to do often and stays
+# far below Drive's anonymous-access throttling.
+#
+#   1. poll   (every 6 h)  — list Drive, fingerprint path+fileId, compare to the
+#                             fingerprint stored in .gdrive-cache. Downloads
+#                             nothing. Job summary says whether it changed.
+#   2. watch  (every 6 h)  — same as poll; when the fingerprint moved, runs the
+#                             real sync, commits, pushes, and opens an issue.
+#   3. sync   (weekly)     — unconditional full sync, and the manual button.
+#
+# The fingerprint catches structural change (files added / removed / renamed)
+# immediately, because Drive mints a new fileId for a new file. A same-fileId
+# content replacement is *not* visible in the listing, so the weekly full sync
+# is what guarantees content-level drift is caught.
 #
 # Only files tracked by git are committed; .gitignore keeps source zips, WAV
-# sample banks and SD-card runtime data out of the history.
+# sample banks and SD-card runtime data out of history.
 
 on:
   schedule:
-    # Mondays 06:17 UTC (off the hour to avoid the cron stampede).
+    # Every 6 hours, off the hour to avoid the cron stampede.
+    - cron: '23 */6 * * *'
+    # Weekly unconditional full sync (Mondays 06:17 UTC).
     - cron: '17 6 * * 1'
   workflow_dispatch:
     inputs:
       mode:
-        description: 'check only, or full sync'
+        description: 'check only, poll+sync if changed, or force a full sync'
         required: true
         default: check
         type: choice
-        options: [check, sync]
+        options: [check, watch, sync]
 
 permissions:
   contents: write
+  issues: write
 
 concurrency:
   group: drive-sync
   cancel-in-progress: false
 
+env:
+  PY: python3
+
 jobs:
-  check:
-    # NOTE: `inputs.*` is only defined for workflow_dispatch; on a schedule it
-    # is empty. Always guard on event_name first so the two jobs stay exclusive.
-    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'sync'
+  # ---------------------------------------------------------------------
+  # Cheap poll: listing only. Every job below reuses this to decide whether
+  # there is anything worth downloading.
+  # ---------------------------------------------------------------------
+  poll:
+    if: >
+      github.event_name == 'workflow_dispatch' && inputs.mode == 'check' ||
+      (github.event_name == 'schedule' && github.event.schedule == '23 */6 * * *')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+    outputs:
+      changed: ${{ steps.fp.outputs.changed }}
+      fingerprint: ${{ steps.fp.outputs.fingerprint }}
     steps:
       - uses: actions/checkout@v4
 
@@ -47,45 +73,187 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Compare repo to Drive
+      - name: Install gdown
         run: |
           python3 -m venv .venv-drive
           .venv-drive/bin/pip install -q --disable-pip-version-check gdown
-          GDOWN="$PWD/.venv-drive/bin/gdown" ./scripts/sync-from-drive.sh --check
 
-  sync:
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'sync')
+      - name: Restore last-seen fingerprint
+        uses: actions/cache/restore@v4
+        with:
+          # The fingerprint must survive between runs or every poll reports
+          # "new". Keyed by run id so each run saves its own copy; restore-keys
+          # picks up the most recent one.
+          path: .gdrive-cache/.fingerprint
+          key: gdrive-fp-${{ github.run_id }}
+          restore-keys: |
+            gdrive-fp-
+
+      - name: Poll Drive listing
+        id: fp
+        env:
+          GDOWN: ${{ github.workspace }}/.venv-drive/bin/gdown
+        run: |
+          set -o pipefail
+          out="$(./scripts/sync-from-drive.sh --poll --fingerprint .gdrive-cache/.fingerprint)"
+          echo "$out"
+          state="$(printf '%s\n' "$out" | sed -n 's/^STATE //p' | tail -1)"
+          fp="$(printf '%s\n' "$out" | sed -n 's/^>> fingerprint: //p' | tail -1)"
+          echo "fingerprint=$fp" >> "$GITHUB_OUTPUT"
+          if [[ "$state" == "changed" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo "### Drive poll"
+            echo ""
+            echo "- fingerprint: \`${fp:-none}\`"
+            echo "- state vs last sync: **${state:-unknown}**"
+            echo ""
+            printf '%s\n' "$out" | sed -n '/remote \//p'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save fingerprint for next poll
+        # `always()` so the next poll compares against this run even if a later
+        # step fails. When nothing changed, the synced fingerprint is unchanged
+        # anyway; when it did, the watch job writes the post-sync one.
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .gdrive-cache/.fingerprint
+          key: gdrive-fp-${{ github.run_id }}
+
+  # ---------------------------------------------------------------------
+  # Scheduled watch: poll, and only do the expensive work if it moved.
+  # ---------------------------------------------------------------------
+  watch:
+    # Scheduled: only on the 6-hourly cron, and only when the poll found the
+    # listing actually moved. Manual: runs on demand and gates itself on its
+    # own --if-changed fingerprint check in the step below, so it skips the
+    # download when nothing moved.
+    #
+    # NOTE: this must stay ONE `if:` key. A second one silently overwrites the
+    # first, which is how the original guard was lost.
+    if: >
+      always() &&
+      ((github.event_name == 'schedule' &&
+        github.event.schedule == '23 */6 * * *' &&
+        needs.poll.outputs.changed == 'true') ||
+       (github.event_name == 'workflow_dispatch' && inputs.mode == 'watch'))
+    needs: poll
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
         with:
-          # A token that can push; see README "Keeping up to date".
           token: ${{ secrets.SYNC_TOKEN || github.token }}
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
+      - name: Restore download cache + last-seen fingerprint
+        uses: actions/cache@v4
+        with:
+          path: |
+            .gdrive-cache
+          key: gdrive-cache-${{ needs.poll.outputs.fingerprint || github.run_id }}
+          restore-keys: gdrive-cache-
+
+      - name: Install gdown
+        run: |
+          python3 -m venv .venv-drive
+          .venv-drive/bin/pip install -q --disable-pip-version-check gdown
+
       - name: Sync from Drive and commit
         env:
+          GDOWN: ${{ github.workspace }}/.venv-drive/bin/gdown
           GIT_AUTHOR_NAME: drive-sync[bot]
           GIT_AUTHOR_EMAIL: drive-sync@users.noreply.github.com
           GIT_COMMITTER_NAME: drive-sync[bot]
           GIT_COMMITTER_EMAIL: drive-sync@users.noreply.github.com
         run: |
+          # On the scheduled path the `poll` job already established that the
+          # listing moved, so sync unconditionally. On manual dispatch there is
+          # no poll result, so let the script's own gate decide.
+          if [[ -n "${{ needs.poll.outputs.changed }}" ]]; then
+            ./scripts/sync-from-drive.sh --commit
+          else
+            ./scripts/sync-from-drive.sh --commit --if-changed
+          fi
+
+      - name: Push
+        id: push
+        run: |
+          BRANCH="$GITHUB_REF_NAME"
+          git fetch -q origin "$BRANCH"
+          if git diff --quiet FETCH_HEAD HEAD; then
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+          else
+            git push origin "HEAD:$BRANCH"
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+            git log --oneline FETCH_HEAD..HEAD >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Report what changed
+        if: steps.push.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+        run: |
+          FILES="$(git diff --name-only HEAD~1 HEAD | head -50)"
+          gh issue create \
+            --title "Drive sync: upstream changed $(date -u +%Y-%m-%d)" \
+            --body "$(printf '303 Resistance updated the public Drive folder.\n\nSynced in %s.\n\nChanged files:\n\n```\n%s\n```\n\nSource: https://drive.google.com/drive/folders/1zUUMdNquQDe2gFwHZTMbG1DjhoXnX-bQ' "$(git rev-parse --short HEAD)" "$FILES")" \
+            || echo "could not open issue (non-fatal)"
+
+  # ---------------------------------------------------------------------
+  # Weekly unconditional sync, and the manual "sync" button. Bypasses the
+  # change gate because a same-fileId content edit is invisible to the poll.
+  # ---------------------------------------------------------------------
+  sync:
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '17 6 * * 1') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'sync')
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/cache@v4
+        with:
+          path: .gdrive-cache
+          key: gdrive-cache-full-${{ github.run_id }}
+          restore-keys: gdrive-cache-
+
+      - name: Install gdown
+        run: |
           python3 -m venv .venv-drive
           .venv-drive/bin/pip install -q --disable-pip-version-check gdown
-          GDOWN="$PWD/.venv-drive/bin/gdown" ./scripts/sync-from-drive.sh --commit
 
-      - name: Push if anything changed
+      - name: Sync from Drive and commit
+        env:
+          GDOWN: ${{ github.workspace }}/.venv-drive/bin/gdown
+          GIT_AUTHOR_NAME: drive-sync[bot]
+          GIT_AUTHOR_EMAIL: drive-sync@users.noreply.github.com
+          GIT_COMMITTER_NAME: drive-sync[bot]
+          GIT_COMMITTER_EMAIL: drive-sync@users.noreply.github.com
+        run: ./scripts/sync-from-drive.sh --commit --full
+
+      - name: Push
         run: |
-          # A scheduled run checks out the default branch detached, so compare
-          # against FETCH_HEAD-safe refs rather than assuming origin/<branch>.
           BRANCH="$GITHUB_REF_NAME"
           git fetch -q origin "$BRANCH"
           if git diff --quiet FETCH_HEAD HEAD; then
             echo "no new commits — nothing to push"
           else
             git push origin "HEAD:$BRANCH"
+            git log --oneline FETCH_HEAD..HEAD
           fi
+
